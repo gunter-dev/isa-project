@@ -57,8 +57,6 @@ void callback (u_char *user __attribute__((unused)), const struct pcap_pkthdr *h
         struct ip *iph = (struct ip*)(bytes + sizeof(struct ether_header));
         // https://www.gta.ufrj.br/ensino/eel878/sockets/inet_ntoaman.html
         cout << "src IP:\t\t" << inet_ntoa(iph->ip_src) << endl;
-
-        printf("src port: %d dest port: %d \n", tcp->th_sport, tcp->th_dport);
         cout << "dst IP:\t\t" << inet_ntoa(iph->ip_dst) << endl;
     }
 
