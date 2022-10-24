@@ -11,6 +11,11 @@
 
 using namespace std;
 
+#define ICMP 1
+#define TCP 6
+#define UDP 17
+#define ICMPv6 58
+
 // struct that represents the args
 typedef struct arguments {
     char *file;
@@ -18,6 +23,63 @@ typedef struct arguments {
     int inactive_timer;
     int count;
 } Arguments;
+
+typedef struct flow_key {
+    in_addr src_ip;
+    in_addr dst_ip;
+    char *src_port;
+    char *dst_port;
+    uint16_t protocol;
+} Flow_key;
+
+void handle_flow(Flow_key key) {
+    cout << "protocol:\t" << key.protocol << endl;
+    cout << "src IP:\t\t" << inet_ntoa(key.src_ip) << ":" << key.src_port << endl;
+    cout << "dst IP:\t\t" << inet_ntoa(key.dst_ip) << ":" << key.dst_port << endl;
+}
+
+void icmp_packet(const u_char *bytes, struct ip *iph, uint16_t protocol) {
+    char icmp_port[] = "0";
+    Flow_key key = { iph->ip_src, iph->ip_dst, icmp_port, icmp_port, protocol };
+    handle_flow(key);
+}
+
+void handle_ipv6(const u_char *bytes) {
+        // the ip6_hdr structure is described here -> https://sites.uclouvain.be/SystInfo/usr/include/netinet/ip6.h.html
+        struct ip6_hdr *iph = (struct ip6_hdr*)(bytes + sizeof(struct ether_header));
+        char *src_ip = (char *) malloc(NI_MAXHOST);
+        char *dst_ip = (char *) malloc(NI_MAXHOST);
+        // https://man7.org/linux/man-pages/man3/inet_ntop.3.html
+        inet_ntop(AF_INET6, &iph->ip6_src, src_ip, NI_MAXHOST);
+        inet_ntop(AF_INET6, &iph->ip6_dst, dst_ip, NI_MAXHOST);
+
+//        Flow_key key = { src_ip, dst_ip, icmp_port, icmp_port, header->ether_type };
+//        handle_flow(key);
+
+        free(src_ip);
+        free(dst_ip);
+}
+
+void handle_ipv4(const u_char *bytes) {
+    // the ip structure is described here -> https://sites.uclouvain.be/SystInfo/usr/include/netinet/ip.h.html
+    struct ip *iph = (struct ip*)(bytes + sizeof(struct ether_header));
+    // https://www.gta.ufrj.br/ensino/eel878/sockets/inet_ntoaman.html
+
+    switch (iph->ip_p) {
+        case ICMP:
+            icmp_packet(bytes, iph, ICMP);
+            break;
+        case ICMPv6:
+            icmp_packet(bytes, iph, ICMPv6);
+            break;
+        case TCP:
+            cout << "TCP" << endl;
+            break;
+        case UDP:
+            cout << "UDP" << endl;
+            break;
+    }
+}
 
 void callback (u_char *user __attribute__((unused)), const struct pcap_pkthdr *h, const u_char *bytes) {
     // h->ts has this structure -> https://renenyffenegger.ch/notes/development/languages/C-C-plus-plus/C/libc/structs/timeval
@@ -39,26 +101,8 @@ void callback (u_char *user __attribute__((unused)), const struct pcap_pkthdr *h
 
     struct ether_header *header = (struct ether_header *) bytes;
 
-    cout << "protocol:\t" << (header->ether_type) << endl;
-
-    if (ntohs(header->ether_type) == ETHERTYPE_IPV6) {
-        // the ip6_hdr structure is described here -> https://sites.uclouvain.be/SystInfo/usr/include/netinet/ip6.h.html
-        struct ip6_hdr *iph = (struct ip6_hdr*)(bytes + sizeof(struct ether_header));
-        char *ip = (char *) malloc(NI_MAXHOST);
-        // https://man7.org/linux/man-pages/man3/inet_ntop.3.html
-        inet_ntop(AF_INET6, &iph->ip6_src, ip, NI_MAXHOST);
-        cout << "src IP:\t\t" << ip << endl;
-        inet_ntop(AF_INET6, &iph->ip6_dst, ip, NI_MAXHOST);
-        cout << "dst IP:\t\t" << ip << endl;
-        free(ip);
-    }
-    else {
-        // the ip structure is described here -> https://sites.uclouvain.be/SystInfo/usr/include/netinet/ip.h.html
-        struct ip *iph = (struct ip*)(bytes + sizeof(struct ether_header));
-        // https://www.gta.ufrj.br/ensino/eel878/sockets/inet_ntoaman.html
-        cout << "src IP:\t\t" << inet_ntoa(iph->ip_src) << endl;
-        cout << "dst IP:\t\t" << inet_ntoa(iph->ip_dst) << endl;
-    }
+    if (ntohs(header->ether_type) == ETHERTYPE_IPV6) handle_ipv6(bytes);
+    else if (ntohs(header->ether_type) == ETHERTYPE_IP) handle_ipv4(bytes);
 
     cout << endl;
 }
