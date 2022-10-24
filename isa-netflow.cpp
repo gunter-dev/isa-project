@@ -33,6 +33,7 @@ typedef struct flow_key {
 } Flow_key;
 
 void handle_flow(Flow_key key) {
+    // https://www.gta.ufrj.br/ensino/eel878/sockets/inet_ntoaman.html
     cout << "protocol:\t" << key.protocol << endl;
     cout << "src IP:\t\t" << inet_ntoa(key.src_ip) << ":" << key.src_port << endl;
     cout << "dst IP:\t\t" << inet_ntoa(key.dst_ip) << ":" << key.dst_port << endl;
@@ -47,8 +48,10 @@ void icmp_packet(const u_char *bytes, struct ip *iph, uint16_t protocol) {
 void handle_ipv6(const u_char *bytes) {
         // the ip6_hdr structure is described here -> https://sites.uclouvain.be/SystInfo/usr/include/netinet/ip6.h.html
         struct ip6_hdr *iph = (struct ip6_hdr*)(bytes + sizeof(struct ether_header));
+
         char *src_ip = (char *) malloc(NI_MAXHOST);
         char *dst_ip = (char *) malloc(NI_MAXHOST);
+
         // https://man7.org/linux/man-pages/man3/inet_ntop.3.html
         inet_ntop(AF_INET6, &iph->ip6_src, src_ip, NI_MAXHOST);
         inet_ntop(AF_INET6, &iph->ip6_dst, dst_ip, NI_MAXHOST);
@@ -63,7 +66,6 @@ void handle_ipv6(const u_char *bytes) {
 void handle_ipv4(const u_char *bytes) {
     // the ip structure is described here -> https://sites.uclouvain.be/SystInfo/usr/include/netinet/ip.h.html
     struct ip *iph = (struct ip*)(bytes + sizeof(struct ether_header));
-    // https://www.gta.ufrj.br/ensino/eel878/sockets/inet_ntoaman.html
 
     switch (iph->ip_p) {
         case ICMP:
