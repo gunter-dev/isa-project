@@ -6,15 +6,22 @@
 #include <ctime>
 #include <netinet/ip.h>
 #include <netinet/ip6.h>
-#include <netinet/ether.h>
+#include <netinet/tcp.h>
+#include <netinet/udp.h>
 #include <netinet/if_ether.h>
 
 using namespace std;
+
+/* ethernet headers are always exactly 14 bytes <- https://www.tcpdump.org/pcap.html */
+#define SIZE_ETHERNET 14
 
 #define ICMP 1
 #define TCP 6
 #define UDP 17
 #define ICMPv6 58
+
+#define IP 2048
+#define IPv6 34525
 
 // struct that represents the args
 typedef struct arguments {
@@ -27,21 +34,35 @@ typedef struct arguments {
 typedef struct flow_key {
     in_addr src_ip;
     in_addr dst_ip;
-    char *src_port;
-    char *dst_port;
+    uint16_t src_port;
+    uint16_t dst_port;
     uint16_t protocol;
 } Flow_key;
 
 void handle_flow(Flow_key key) {
     // https://www.gta.ufrj.br/ensino/eel878/sockets/inet_ntoaman.html
     cout << "protocol:\t" << key.protocol << endl;
-    cout << "src IP:\t\t" << inet_ntoa(key.src_ip) << ":" << key.src_port << endl;
-    cout << "dst IP:\t\t" << inet_ntoa(key.dst_ip) << ":" << key.dst_port << endl;
+    cout << "src IP:\t\t" << inet_ntoa(key.src_ip) << ":" << ntohs(key.src_port) << endl;
+    cout << "dst IP:\t\t" << inet_ntoa(key.dst_ip) << ":" << ntohs(key.dst_port) << endl;
 }
 
 void icmp_packet(const u_char *bytes, struct ip *iph, uint16_t protocol) {
-    char icmp_port[] = "0";
-    Flow_key key = { iph->ip_src, iph->ip_dst, icmp_port, icmp_port, protocol };
+    Flow_key key = { iph->ip_src, iph->ip_dst, 0, 0, protocol };
+    handle_flow(key);
+}
+
+/* header size is the ip header size + the ethernet header size */
+void tcp_packet(const u_char *bytes, struct ip *iph, u_int header_size) {
+    struct tcphdr *tcph = (struct tcphdr*)(bytes + header_size);
+
+    Flow_key key = { iph->ip_src, iph->ip_dst, tcph->th_sport, tcph->th_dport, TCP };
+    handle_flow(key);
+}
+
+void udp_packet(const u_char *bytes, struct ip *iph, u_int header_size) {
+    struct udphdr *udph = (struct udphdr *)(bytes + header_size);
+
+    Flow_key key = { iph->ip_src, iph->ip_dst, udph->uh_sport, udph->uh_dport, UDP };
     handle_flow(key);
 }
 
@@ -75,12 +96,14 @@ void handle_ipv4(const u_char *bytes) {
             icmp_packet(bytes, iph, ICMPv6);
             break;
         case TCP:
-            cout << "TCP" << endl;
+            tcp_packet(bytes, iph, (iph->ip_hl * 4) + SIZE_ETHERNET);
             break;
         case UDP:
-            cout << "UDP" << endl;
+            udp_packet(bytes, iph, (iph->ip_hl * 4) + SIZE_ETHERNET);
             break;
     }
+
+    cout << endl;
 }
 
 void callback (u_char *user __attribute__((unused)), const struct pcap_pkthdr *h, const u_char *bytes) {
@@ -103,10 +126,8 @@ void callback (u_char *user __attribute__((unused)), const struct pcap_pkthdr *h
 
     struct ether_header *header = (struct ether_header *) bytes;
 
-    if (ntohs(header->ether_type) == ETHERTYPE_IPV6) handle_ipv6(bytes);
-    else if (ntohs(header->ether_type) == ETHERTYPE_IP) handle_ipv4(bytes);
-
-    cout << endl;
+    if (ntohs(header->ether_type) == IPv6) handle_ipv6(bytes);
+    else if (ntohs(header->ether_type) == IP) handle_ipv4(bytes);
 }
 
 void parse_arguments(int argc, char **argv, Arguments *arguments) {
