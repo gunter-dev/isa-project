@@ -2,8 +2,9 @@
 #include <iomanip>
 #include <cstring>
 #include <getopt.h>
-#include <pcap/pcap.h>
 #include <ctime>
+#include <map>
+#include <pcap/pcap.h>
 #include <netinet/ip.h>
 #include <netinet/ip6.h>
 #include <netinet/tcp.h>
@@ -31,23 +32,41 @@ typedef struct arguments {
     int count;
 } Arguments;
 
-typedef struct flow_key {
-    in_addr src_ip;
-    in_addr dst_ip;
-    uint16_t src_port;
-    uint16_t dst_port;
-    uint16_t protocol;
-} Flow_key;
+typedef struct flow {
+    uint32_t dPkts; /* amount of packets */
+    uint32_t dOctets;
+    timeval first; /* when was the first packet sent */
+    timeval last; /* when was the last packet sent */
+    char *tcp_flags; /* tcp flags that appeared in the communication */
+} Flow;
+
+// TODO: TOS
+typedef tuple <uint32_t, uint32_t, uint16_t, uint16_t, uint8_t> Flow_key;
+
+map<Flow_key, Flow> flow_cache;
 
 void handle_flow(Flow_key key) {
     // https://www.gta.ufrj.br/ensino/eel878/sockets/inet_ntoaman.html
-    cout << "protocol:\t" << key.protocol << endl;
-    cout << "src IP:\t\t" << inet_ntoa(key.src_ip) << ":" << ntohs(key.src_port) << endl;
-    cout << "dst IP:\t\t" << inet_ntoa(key.dst_ip) << ":" << ntohs(key.dst_port) << endl;
+    cout << "protocol:\t" << get<4>(key) << endl;
+    cout << "src IP:\t\t" << get<0>(key) << ":" << ntohs(get<2>(key)) << endl;
+    cout << "dst IP:\t\t" << get<1>(key) << ":" << ntohs(get<3>(key)) << endl;
+
+    // TODO: check_flow_timers()
+
+    // TODO: tcp_flags
+    char test[] = "-";
+
+    Flow todo_flow = { 0, 0, 0, 0, 0, 0, test };
+
+    if (flow_cache.find(key) == flow_cache.end()) {
+        flow_cache.insert(make_pair(key, todo_flow));
+    } else {
+        cout << "found" << endl;
+    }
 }
 
 void icmp_packet(const u_char *bytes, struct ip *iph, uint16_t protocol) {
-    Flow_key key = { iph->ip_src, iph->ip_dst, 0, 0, protocol };
+    Flow_key key(iph->ip_src.s_addr, iph->ip_dst.s_addr, 0, 0, protocol);
     handle_flow(key);
 }
 
@@ -55,14 +74,14 @@ void icmp_packet(const u_char *bytes, struct ip *iph, uint16_t protocol) {
 void tcp_packet(const u_char *bytes, struct ip *iph, u_int header_size) {
     struct tcphdr *tcph = (struct tcphdr*)(bytes + header_size);
 
-    Flow_key key = { iph->ip_src, iph->ip_dst, tcph->th_sport, tcph->th_dport, TCP };
+    Flow_key key(iph->ip_src.s_addr, iph->ip_dst.s_addr, tcph->th_sport, tcph->th_dport, TCP);
     handle_flow(key);
 }
 
 void udp_packet(const u_char *bytes, struct ip *iph, u_int header_size) {
     struct udphdr *udph = (struct udphdr *)(bytes + header_size);
 
-    Flow_key key = { iph->ip_src, iph->ip_dst, udph->uh_sport, udph->uh_dport, UDP };
+    Flow_key key(iph->ip_src.s_addr, iph->ip_dst.s_addr, udph->uh_sport, udph->uh_dport, UDP);
     handle_flow(key);
 }
 
@@ -222,7 +241,7 @@ int export_flows_from_pcap_file(Arguments arguments) {
     }
 
     // https://www.tcpdump.org/manpages/pcap_loop.3pcap.html
-    pcap_loop(handle, 4, (pcap_handler)callback, nullptr);
+    pcap_loop(handle, 0, (pcap_handler)callback, nullptr);
 
     pcap_close(handle);
 
