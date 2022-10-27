@@ -1,6 +1,7 @@
 #include <iostream>
 #include <iomanip>
 #include <cstring>
+#include <string.h>
 #include <getopt.h>
 #include <ctime>
 #include <map>
@@ -29,7 +30,8 @@ typedef struct arguments {
     char *file;
     int active_timer;
     int inactive_timer;
-    int count; // TODO: count and netflow_collector
+    int count; // TODO: count
+    sockaddr_in netflow_collector;
 } Arguments;
 
 typedef struct flow {
@@ -56,7 +58,7 @@ typedef struct flow {
 } Flow;
 
 // TODO: TOS
-typedef tuple <uint32_t, uint32_t, uint16_t, uint16_t, uint8_t> Flow_key;
+typedef tuple <uint32_t, uint32_t, uint16_t, uint16_t, uint8_t, uint8_t> Flow_key;
 
 map<Flow_key, Flow> flow_cache;
 typedef map<Flow_key, Flow>::iterator Iterator;
@@ -68,104 +70,113 @@ void error_exit(const char *message, uint8_t code) {
     exit(code);
 }
 
+void export_flow(Flow flow) {
+    int sock, i;
+
+    if ((sock = socket(AF_INET, SOCK_DGRAM, 0)) == -1)
+        error_exit("socket() failed\n", 1);
+
+    if (connect(sock, (struct sockaddr *)&arguments.netflow_collector, sizeof(arguments.netflow_collector))  == -1)
+        error_exit("connect() failed", 1);
+
+    i = send(sock, &flow, sizeof (Flow), 0);
+    if (i == -1) error_exit("send() failed", 1);
+    else if (i != sizeof (Flow)) error_exit("send(): buffer written partially", 1);
+}
+
 void check_flow_timers() {
     for (Iterator it = flow_cache.begin(); it != flow_cache.end(); ++it) {
         if (it->second.first > current_packet_time - (arguments.active_timer * 1000) || it->second.last > current_packet_time - (arguments.inactive_timer * 1000)) {
-            // TODO: export flow
+            export_flow(it->second);
             flow_cache.erase(it);
         }
     }
 }
 
-void handle_flow(Flow_key key, uint8_t tcp_flags) {
-    // https://www.gta.ufrj.br/ensino/eel878/sockets/inet_ntoaman.html
-    cout << "protocol:\t" << unsigned(get<4>(key)) << endl;
-    cout << "src IP:\t\t" << get<0>(key) << ":" << ntohs(get<2>(key)) << endl;
-    cout << "dst IP:\t\t" << get<1>(key) << ":" << ntohs(get<3>(key)) << endl;
-
+void handle_flow(Flow_key key, uint8_t tcp_flags, uint32_t dOctets) {
     Iterator iterator = flow_cache.find(key);
 
     // according to https://cplusplus.com/reference/map/map/find/
     // std::map::find returns std::map::end if the element is not present in the map
     if (iterator == flow_cache.end()) {
         // the flow is not present, we need to insert it
-        Flow flow = { get<0>(key), get<1>(key), 0, 0, 0, 1, 0,
+        Flow flow = { get<0>(key), get<1>(key), 0, 0, 0, 1, dOctets,
                       current_packet_time, current_packet_time, get<2>(key), get<3>(key), 0,
-                      tcp_flags, get<4>(key), 0, 0, 0, 0, 0, 0 };
+                      tcp_flags, get<4>(key), get<5>(key), 0, 0, 0, 0, 0 };
 
         flow_cache.insert(make_pair(key, flow));
     } else {
         // the flow is found, we need to update it
         iterator->second.dPkts++;
+        iterator->second.dOctets += dOctets;
         iterator->second.last = current_packet_time;
         iterator->second.tcp_flags |= tcp_flags;
     }
 }
 
-void icmp_packet(const u_char *bytes, struct ip *iph, uint16_t protocol) {
-    Flow_key key(iph->ip_src.s_addr, iph->ip_dst.s_addr, 0, 0, protocol);
-    handle_flow(key, 0);
+void icmp_packet(struct ip *iph, uint16_t protocol, uint32_t dOctets) {
+    Flow_key key(iph->ip_src.s_addr, iph->ip_dst.s_addr, 0, 0, protocol, iph->ip_tos);
+    handle_flow(key, 0, dOctets);
 }
 
 /* header size is the ip header size + the ethernet header size */
-void tcp_packet(const u_char *bytes, struct ip *iph, u_int header_size) {
+void tcp_packet(const u_char *bytes, struct ip *iph, u_int header_size, uint32_t dOctets) {
     struct tcphdr *tcph = (struct tcphdr*)(bytes + header_size);
 
-    Flow_key key(iph->ip_src.s_addr, iph->ip_dst.s_addr, tcph->th_sport, tcph->th_dport, TCP);
-    handle_flow(key, tcph->th_flags);
+    Flow_key key(iph->ip_src.s_addr, iph->ip_dst.s_addr, tcph->th_sport, tcph->th_dport, TCP, iph->ip_tos);
+    handle_flow(key, tcph->th_flags, dOctets);
 }
 
-void udp_packet(const u_char *bytes, struct ip *iph, u_int header_size) {
+void udp_packet(const u_char *bytes, struct ip *iph, u_int header_size, uint32_t dOctets) {
     struct udphdr *udph = (struct udphdr *)(bytes + header_size);
 
-    Flow_key key(iph->ip_src.s_addr, iph->ip_dst.s_addr, udph->uh_sport, udph->uh_dport, UDP);
-    handle_flow(key, 0);
+    Flow_key key(iph->ip_src.s_addr, iph->ip_dst.s_addr, udph->uh_sport, udph->uh_dport, UDP, iph->ip_tos);
+    handle_flow(key, 0, dOctets);
 }
 
-void handle_ipv4(const u_char *bytes) {
+void handle_ipv4(const u_char *bytes, uint32_t dOctets) {
     // the ip structure is described here -> https://sites.uclouvain.be/SystInfo/usr/include/netinet/ip.h.html
     struct ip *iph = (struct ip*)(bytes + sizeof(struct ether_header));
 
     switch (iph->ip_p) {
         case ICMP:
-            icmp_packet(bytes, iph, ICMP);
+            icmp_packet(iph, ICMP, dOctets);
             break;
         case ICMPv6:
-            icmp_packet(bytes, iph, ICMPv6);
+            icmp_packet(iph, ICMPv6, dOctets);
             break;
         case TCP:
-            tcp_packet(bytes, iph, (iph->ip_hl * 4) + SIZE_ETHERNET);
+            tcp_packet(bytes, iph, (iph->ip_hl * 4) + SIZE_ETHERNET, dOctets);
             break;
         case UDP:
-            udp_packet(bytes, iph, (iph->ip_hl * 4) + SIZE_ETHERNET);
+            udp_packet(bytes, iph, (iph->ip_hl * 4) + SIZE_ETHERNET, dOctets);
             break;
     }
-
-    cout << endl;
 }
 
 void callback (u_char *user __attribute__((unused)), const struct pcap_pkthdr *h, const u_char *bytes) {
-/*    // h->ts has this structure -> https://renenyffenegger.ch/notes/development/languages/C-C-plus-plus/C/libc/structs/timeval
-    tm *ptm = localtime(&h->ts.tv_sec);
-    char date[11];
-    char time[9];
-    // got this from strftime documentation -> https://en.cppreference.com/w/cpp/chrono/c/strftime
-    strftime(date, 11, "%F", ptm);
-    strftime(time, 9, "%T", ptm);
-
-    cout << "date:\t\t" << date << endl;
-    cout << "time:\t\t" << time << ".";
-    // setfill and setw makes sure, that the millisecond part is printed correctly
-    // for example 50 milliseconds should be printed as 050 milliseconds
-    // https://www.cplusplus.com/reference/iomanip/setfill/
-    cout << setfill('0') << setw(3);
-    // h->ts.tv_usec is divided to get time in milliseconds
-    cout << h->ts.tv_usec/1000 << endl;*/
-
     current_packet_time = h->ts.tv_sec*1000 + h->ts.tv_usec/1000;
     struct ether_header *header = (struct ether_header *) bytes;
 
-    if (ntohs(header->ether_type) == IP) handle_ipv4(bytes);
+    uint32_t dOctets = h->caplen - sizeof(ether_header);
+
+    if (ntohs(header->ether_type) == IP) handle_ipv4(bytes, dOctets);
+}
+
+sockaddr_in get_default_netflow_collector() {
+    sockaddr_in default_netflow_collector;
+    struct hostent *servent;
+
+    memset(&default_netflow_collector, 0, sizeof(default_netflow_collector));
+    default_netflow_collector.sin_family = AF_INET;
+
+    if ((servent = gethostbyname("127.0.0.1")) == NULL)
+        error_exit("Netflow collector extracting failed", 1);
+
+    memcpy(&default_netflow_collector.sin_addr,servent->h_addr,servent->h_length);
+
+    default_netflow_collector.sin_port = htons(atoi("2055"));
+    return default_netflow_collector;
 }
 
 void parse_arguments(int argc, char **argv) {
@@ -175,6 +186,7 @@ void parse_arguments(int argc, char **argv) {
 
     static struct option options[] = {
                     { "file", required_argument, nullptr, 'f' },
+                    { "netflow_collector", required_argument, nullptr, 'c' },
                     { "active_timer", required_argument, nullptr, 'a' },
                     { "inactive_timer", required_argument, nullptr, 'i' },
                     { "count", required_argument, nullptr, 'm' },
@@ -184,11 +196,30 @@ void parse_arguments(int argc, char **argv) {
     bool done = false;
 
     while (!done) {
-        int c = getopt_long(argc, argv, "f:a:i:m:", options, &idx);
+        int c = getopt_long(argc, argv, "f:c:a:i:m:", options, &idx);
 
         switch (c) {
             case 'f':
                 arguments.file = optarg;
+                break;
+
+            case 'c':
+                struct hostent *servent;
+
+                memset(&arguments.netflow_collector, 0, sizeof(arguments.netflow_collector));
+                arguments.netflow_collector.sin_family = AF_INET;
+
+                char *ptr;
+                ptr = strtok(optarg, ":");
+
+                if ((servent = gethostbyname(ptr)) == NULL)
+                    error_exit("Netflow collector extracting failed", 1);
+
+                memcpy(&arguments.netflow_collector.sin_addr,servent->h_addr,servent->h_length);
+
+                ptr = strtok(NULL, ":");
+                if (ptr != NULL) arguments.netflow_collector.sin_port = htons(atoi(ptr));
+
                 break;
 
             case 'a':
@@ -261,7 +292,7 @@ int export_flows_from_pcap_file() {
 
 int main(int argc, char **argv) {
     char stdin_selector[] = "-";
-    arguments = { stdin_selector, 60, 10, 1024 };
+    arguments = { stdin_selector, 60, 10, 1024, get_default_netflow_collector() };
     parse_arguments(argc, argv);
 
     return export_flows_from_pcap_file();
