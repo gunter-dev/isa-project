@@ -23,7 +23,6 @@ using namespace std;
 #define ICMPv6 58
 
 #define IP 2048
-#define IPv6 34525
 
 // struct that represents the args
 typedef struct arguments {
