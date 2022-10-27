@@ -1,10 +1,10 @@
 CPP=g++
 CFLAGS= -std=c++11 -pedantic -Wall -Wextra
 
-all: isa-netflow
+all: flow
 
-isa-netflow: isa-netflow.cpp
+flow: flow.cpp
 	$(CPP) $(CFLAGS) $^ -o $@ -lpcap
 
 clean:
-	rm isa-netflow
+	rm flow
