@@ -45,6 +45,11 @@ typedef tuple <uint32_t, uint32_t, uint16_t, uint16_t, uint8_t> Flow_key;
 
 map<Flow_key, Flow> flow_cache;
 
+void error_exit(const char *message, uint8_t code) {
+    fprintf(stderr, "%s\n", message);
+    exit(code);
+}
+
 void handle_flow(Flow_key key) {
     // https://www.gta.ufrj.br/ensino/eel878/sockets/inet_ntoaman.html
     cout << "protocol:\t" << get<4>(key) << endl;
@@ -83,24 +88,6 @@ void udp_packet(const u_char *bytes, struct ip *iph, u_int header_size) {
 
     Flow_key key(iph->ip_src.s_addr, iph->ip_dst.s_addr, udph->uh_sport, udph->uh_dport, UDP);
     handle_flow(key);
-}
-
-void handle_ipv6(const u_char *bytes) {
-        // the ip6_hdr structure is described here -> https://sites.uclouvain.be/SystInfo/usr/include/netinet/ip6.h.html
-        struct ip6_hdr *iph = (struct ip6_hdr*)(bytes + sizeof(struct ether_header));
-
-        char *src_ip = (char *) malloc(NI_MAXHOST);
-        char *dst_ip = (char *) malloc(NI_MAXHOST);
-
-        // https://man7.org/linux/man-pages/man3/inet_ntop.3.html
-        inet_ntop(AF_INET6, &iph->ip6_src, src_ip, NI_MAXHOST);
-        inet_ntop(AF_INET6, &iph->ip6_dst, dst_ip, NI_MAXHOST);
-
-//        Flow_key key = { src_ip, dst_ip, icmp_port, icmp_port, header->ether_type };
-//        handle_flow(key);
-
-        free(src_ip);
-        free(dst_ip);
 }
 
 void handle_ipv4(const u_char *bytes) {
@@ -145,8 +132,7 @@ void callback (u_char *user __attribute__((unused)), const struct pcap_pkthdr *h
 
     struct ether_header *header = (struct ether_header *) bytes;
 
-    if (ntohs(header->ether_type) == IPv6) handle_ipv6(bytes);
-    else if (ntohs(header->ether_type) == IP) handle_ipv4(bytes);
+    if (ntohs(header->ether_type) == IP) handle_ipv4(bytes);
 }
 
 void parse_arguments(int argc, char **argv, Arguments *arguments) {
@@ -162,8 +148,9 @@ void parse_arguments(int argc, char **argv, Arguments *arguments) {
                     { nullptr, 0, nullptr, 0 }
             };
 
-    while (true) {
-        bool done = false;
+    bool done = false;
+
+    while (!done) {
         int c = getopt_long(argc, argv, "f:a:i:m:", options, &idx);
 
         switch (c) {
@@ -173,38 +160,27 @@ void parse_arguments(int argc, char **argv, Arguments *arguments) {
 
             case 'a':
                 arguments->active_timer = stoi(optarg);
-                if (arguments->active_timer < 0) {
-                    fprintf(stderr, "ERROR: Active timer cannot be a negative number!\n");
-                    exit(1);
-                }
+                if (arguments->active_timer < 0) error_exit("ERROR: Active timer cannot be a negative number!", 1);
                 break;
 
             case 'i':
                 arguments->inactive_timer = stoi(optarg);
-                if (arguments->inactive_timer < 0) {
-                    fprintf(stderr, "ERROR: Inactive timer cannot be a negative number!\n");
-                    exit(1);
-                }
+                if (arguments->inactive_timer < 0) error_exit("ERROR: Inactive timer cannot be a negative number!", 1);
                 break;
 
             case 'm':
                 arguments->count = stoi(optarg);
-                if (arguments->count < 0) {
-                    fprintf(stderr, "ERROR: Flow-cache size cannot be a negative number!\n");
-                    exit(1);
-                }
+                if (arguments->count < 0) error_exit("ERROR: Flow-cache size cannot be a negative number!", 1);
                 break;
 
             case '?':
-                fprintf(stderr, "ERROR: Invalid arguments!\n");
-                exit(1);
+                error_exit("ERROR: Invalid arguments!", 1);
+                break;
 
             default:
                 done = true;
                 break;
         }
-
-        if (done) break;
     }
 }
 
