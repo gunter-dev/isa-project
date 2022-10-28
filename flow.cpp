@@ -56,7 +56,6 @@ typedef struct flow {
     uint16_t pad2; /* we don't know that */
 } Flow;
 
-// TODO: TOS
 typedef tuple <uint32_t, uint32_t, uint16_t, uint16_t, uint8_t, uint8_t> Flow_key;
 
 map<Flow_key, Flow> flow_cache;
@@ -84,15 +83,20 @@ void export_flow(Flow flow) {
 }
 
 void check_flow_timers() {
-    for (Iterator it = flow_cache.begin(); it != flow_cache.end(); ++it) {
+    // deleting according to this stack overflow site -> https://stackoverflow.com/questions/8234779/how-to-remove-from-a-map-while-iterating-it
+    for (Iterator it = flow_cache.begin(); it != flow_cache.end(); /* empty on purpose */) {
         if (it->second.first > current_packet_time - (arguments.active_timer * 1000) || it->second.last > current_packet_time - (arguments.inactive_timer * 1000)) {
             export_flow(it->second);
-            flow_cache.erase(it);
+            it = flow_cache.erase(it);
+        } else {
+            ++it;
         }
     }
 }
 
 void handle_flow(Flow_key key, uint8_t tcp_flags, uint32_t dOctets) {
+    check_flow_timers();
+
     Iterator iterator = flow_cache.find(key);
 
     // according to https://cplusplus.com/reference/map/map/find/
@@ -169,7 +173,7 @@ sockaddr_in get_default_netflow_collector() {
     memset(&default_netflow_collector, 0, sizeof(default_netflow_collector));
     default_netflow_collector.sin_family = AF_INET;
 
-    if ((servent = gethostbyname("127.0.0.1")) == NULL)
+    if ((servent = gethostbyname("127.0.0.1")) == nullptr)
         error_exit("Netflow collector extracting failed", 1);
 
     memcpy(&default_netflow_collector.sin_addr,servent->h_addr,servent->h_length);
@@ -211,13 +215,13 @@ void parse_arguments(int argc, char **argv) {
                 char *ptr;
                 ptr = strtok(optarg, ":");
 
-                if ((servent = gethostbyname(ptr)) == NULL)
+                if ((servent = gethostbyname(ptr)) == nullptr)
                     error_exit("Netflow collector extracting failed", 1);
 
                 memcpy(&arguments.netflow_collector.sin_addr,servent->h_addr,servent->h_length);
 
-                ptr = strtok(NULL, ":");
-                if (ptr != NULL) arguments.netflow_collector.sin_port = htons(atoi(ptr));
+                ptr = strtok(nullptr, ":");
+                if (ptr != nullptr) arguments.netflow_collector.sin_port = htons(atoi(ptr));
 
                 break;
 
