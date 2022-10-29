@@ -3,8 +3,10 @@
 #include <cstring>
 #include <string.h>
 #include <getopt.h>
+#include <math.h>
 #include <ctime>
 #include <map>
+
 #include <pcap/pcap.h>
 #include <netinet/ip.h>
 #include <netinet/ip6.h>
@@ -30,7 +32,7 @@ typedef struct arguments {
     sockaddr_in netflow_collector;  /* IP address (possibly with port) of the NetFlow collector */
     int active_timer;               /* time in seconds, after which active flows are exported, 60 by default */
     int inactive_timer;             /* time in seconds, after which inactive flows are exported, 10 by default */
-    size_t count;                   /* if the amount of flows in flow cache reaches this number, export the oldest */
+    size_t count;                   /* if the amount of flows in flow cache reaches this number, export the oldest, 1024 by default */
 } Arguments;
 
 /* struct representing the whole flow
@@ -89,8 +91,9 @@ map<Flow_key, Flow> flow_cache;
 typedef map<Flow_key, Flow>::iterator Iterator;
 Arguments arguments = {};
 
-uint32_t current_packet_time_secs;
-uint32_t current_packet_time_usecs;
+// TODO: sysuptime
+timeval current_packet_timeval;
+uint32_t boot_time = 0;
 uint32_t flow_sequence = 0;
 
 /**
@@ -166,7 +169,7 @@ void check_flow_timers(uint32_t current_packet_time) {
  * @param dOctets dOctets are calculated earlier from the ether_header
  * */
 void handle_flow(Flow_key key, uint8_t tcp_flags, uint32_t dOctets) {
-    uint32_t current_packet_time = current_packet_time_secs * 1000 + current_packet_time_usecs / 1000;
+    uint32_t current_packet_time = current_packet_timeval.tv_sec * 1000 + current_packet_timeval.tv_usec / 1000;
 
     check_flow_timers(current_packet_time);
 
@@ -176,7 +179,7 @@ void handle_flow(Flow_key key, uint8_t tcp_flags, uint32_t dOctets) {
     // std::map::find returns std::map::end if the element is not present in the map
     if (iterator == flow_cache.end()) {
         // the flow is not present, we need to insert it
-        Flow flow = { ntohs(5),  ntohs(1), ntohl(current_packet_time), ntohl(current_packet_time_secs), ntohl(current_packet_time_usecs*1000),
+        Flow flow = { ntohs(5),  ntohs(1), ntohl(current_packet_time), ntohl(current_packet_timeval.tv_sec), ntohl(current_packet_timeval.tv_usec*1000),
                       ntohl(flow_sequence++), 0, 0, 0, get<0>(key), get<1>(key), 0,
                       0, 0, 1, dOctets, current_packet_time, current_packet_time, get<2>(key),
                       get<3>(key), 0, tcp_flags, get<4>(key), get<5>(key), 0, 0, 0, 0, 0 };
@@ -265,8 +268,9 @@ void handle_ipv4(const u_char *bytes, uint32_t dOctets) {
  * @param bytes the packet itself
  * */
 void callback (u_char *user __attribute__((unused)), const struct pcap_pkthdr *h, const u_char *bytes) {
-    current_packet_time_secs = h->ts.tv_sec;
-    current_packet_time_usecs = h->ts.tv_usec;
+    if (boot_time == 0) boot_time = h->ts.tv_sec * 1000 + h->ts.tv_usec / 1000;
+
+    current_packet_timeval = h->ts;
     struct ether_header *header = (struct ether_header *) bytes;
 
     uint32_t dOctets = h->caplen - sizeof(ether_header);
@@ -371,6 +375,7 @@ void parse_arguments(int argc, char **argv) {
 }
 
 void export_remaining_flows_in_map() {
+    // TODO: export postupne od nejstarsiho
     for (Iterator it = flow_cache.begin(); it != flow_cache.end(); /* empty on purpose */) {
         export_flow(it->second);
         it = flow_cache.erase(it);
