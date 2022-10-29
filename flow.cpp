@@ -36,8 +36,21 @@ typedef struct arguments {
 /* struct representing the whole flow
  * properties marked by "UNKNOWN" in the comment I set to 0 by default
  * since we don't know, what their values should be
+ *
+ * https://www.cisco.com/c/en/us/td/docs/net_mgmt/netflow_collection_engine/3-6/user/guide/format.html#wp1003394
  */
 typedef struct flow {
+    /*--------------------- FLOW HEADER ---------------------*/
+    uint16_t version;       /* NetFlow export format version number */
+    uint16_t count;         /* amount of flows exported in the single packet */
+    uint32_t sys_uptime;    /* current time in milliseconds since the export device booted */
+    uint32_t unix_secs;     /* current count of seconds since 0000 UTC 1970 */
+    uint32_t unix_nsecs;    /* residual current count of seconds since 0000 UTC 1970 */
+    uint32_t flow_sequence; /* sequence counter of total flows seen */
+    uint8_t engine_type;    /* type of flow-switching engine - UNKNOWN */
+    uint8_t engine_id;      /* slot number of the flow-switching engine - UNKNOWN */
+    uint16_t samp_interval; /* first two bits hold the sampling mode; remaining 14 bits hold value of sampling interval - UNKNOWN */
+    /*--------------------- FLOW RECORD ---------------------*/
     uint32_t srcAddr;       /* source IP */
     uint32_t dstAddr;       /* destination IP */
     uint32_t nextHop;       /* IP address of next hop router - UNKNOWN */
@@ -74,8 +87,11 @@ typedef tuple <uint32_t, uint32_t, uint16_t, uint16_t, uint8_t, uint8_t> Flow_ke
 /* global variables */
 map<Flow_key, Flow> flow_cache;
 typedef map<Flow_key, Flow>::iterator Iterator;
-uint32_t current_packet_time;
 Arguments arguments = {};
+
+uint32_t current_packet_time_secs;
+uint32_t current_packet_time_nsecs;
+uint32_t flow_sequence = 0;
 
 /**
  * When an error occurs, this function is called. It prints a message that is
@@ -115,15 +131,13 @@ void export_flow(Flow flow) {
  * in the active_timer argument or if it had been inactive for more than
  * the amount of seconds specified in the inactive_timer, it is exported.
  * */
-void check_flow_timers() {
+void check_flow_timers(uint32_t current_packet_time) {
     // deleting according to this stack overflow site -> https://stackoverflow.com/questions/8234779/how-to-remove-from-a-map-while-iterating-it
     for (Iterator it = flow_cache.begin(); it != flow_cache.end(); /* empty on purpose */) {
         if (it->second.first > current_packet_time - (arguments.active_timer * 1000) || it->second.last > current_packet_time - (arguments.inactive_timer * 1000)) {
             export_flow(it->second);
             it = flow_cache.erase(it);
-        } else {
-            ++it;
-        }
+        } else ++it;
     }
 }
 
@@ -137,7 +151,9 @@ void check_flow_timers() {
  * @param dOctets dOctets are calculated earlier from the ether_header
  * */
 void handle_flow(Flow_key key, uint8_t tcp_flags, uint32_t dOctets) {
-    check_flow_timers();
+    uint32_t current_packet_time = current_packet_time_secs*1000 + current_packet_time_nsecs/1000;
+
+    check_flow_timers(current_packet_time);
 
     Iterator iterator = flow_cache.find(key);
 
@@ -145,9 +161,10 @@ void handle_flow(Flow_key key, uint8_t tcp_flags, uint32_t dOctets) {
     // std::map::find returns std::map::end if the element is not present in the map
     if (iterator == flow_cache.end()) {
         // the flow is not present, we need to insert it
-        Flow flow = { get<0>(key), get<1>(key), 0, 0, 0, 1, dOctets,
-                      current_packet_time, current_packet_time, get<2>(key), get<3>(key), 0,
-                      tcp_flags, get<4>(key), get<5>(key), 0, 0, 0, 0, 0 };
+        Flow flow = { ntohs(5),  ntohs(1), ntohl(current_packet_time), ntohl(current_packet_time_secs), ntohl(current_packet_time_nsecs),
+                      ntohl(flow_sequence++), 0, 0, 0, ntohl(get<0>(key)), ntohl(get<1>(key)), 0,
+                      0, 0, ntohl(1), ntohl(dOctets), ntohl(current_packet_time), ntohl(current_packet_time), ntohs(get<2>(key)),
+                      ntohs(get<3>(key)), 0, tcp_flags, get<4>(key), get<5>(key), 0, 0, 0, 0, 0 };
 
         flow_cache.insert(make_pair(key, flow));
     } else {
@@ -233,7 +250,8 @@ void handle_ipv4(const u_char *bytes, uint32_t dOctets) {
  * @param bytes the packet itself
  * */
 void callback (u_char *user __attribute__((unused)), const struct pcap_pkthdr *h, const u_char *bytes) {
-    current_packet_time = h->ts.tv_sec*1000 + h->ts.tv_usec/1000;
+    current_packet_time_secs = h->ts.tv_sec;
+    current_packet_time_nsecs = h->ts.tv_usec;
     struct ether_header *header = (struct ether_header *) bytes;
 
     uint32_t dOctets = h->caplen - sizeof(ether_header);
