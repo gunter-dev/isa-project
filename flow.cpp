@@ -30,7 +30,7 @@ typedef struct arguments {
     sockaddr_in netflow_collector;  /* IP address (possibly with port) of the NetFlow collector */
     int active_timer;               /* time in seconds, after which active flows are exported, 60 by default */
     int inactive_timer;             /* time in seconds, after which inactive flows are exported, 10 by default */
-    int count; // TODO: count
+    size_t count;                   /* if the amount of flows in flow cache reaches this number, export the oldest */
 } Arguments;
 
 /* struct representing the whole flow
@@ -90,7 +90,7 @@ typedef map<Flow_key, Flow>::iterator Iterator;
 Arguments arguments = {};
 
 uint32_t current_packet_time_secs;
-uint32_t current_packet_time_nsecs;
+uint32_t current_packet_time_usecs;
 uint32_t flow_sequence = 0;
 
 /**
@@ -112,6 +112,11 @@ void error_exit(const char *message, uint8_t code) {
  * @param flow The flow to be sent
  * */
 void export_flow(Flow flow) {
+    flow.dPkts = ntohl(flow.dPkts);
+    flow.dOctets = ntohl(flow.dOctets);
+    flow.first = ntohl(flow.first);
+    flow.last = ntohl(flow.last);
+
     int sock, i;
 
     if ((sock = socket(AF_INET, SOCK_DGRAM, 0)) == -1)
@@ -133,11 +138,21 @@ void export_flow(Flow flow) {
  * */
 void check_flow_timers(uint32_t current_packet_time) {
     // deleting according to this stack overflow site -> https://stackoverflow.com/questions/8234779/how-to-remove-from-a-map-while-iterating-it
-    for (Iterator it = flow_cache.begin(); it != flow_cache.end(); /* empty on purpose */) {
-        if (it->second.first > current_packet_time - (arguments.active_timer * 1000) || it->second.last > current_packet_time - (arguments.inactive_timer * 1000)) {
+    Iterator oldest = flow_cache.begin();
+
+    for (Iterator it = oldest; it != flow_cache.end(); /* empty on purpose */) {
+        if (it->second.first < current_packet_time - (arguments.active_timer * 1000) || it->second.last < current_packet_time - (arguments.inactive_timer * 1000)) {
             export_flow(it->second);
             it = flow_cache.erase(it);
-        } else ++it;
+        } else {
+            if (oldest->first > it->first) oldest = it;
+            ++it;
+        }
+    }
+
+    if (arguments.count <= flow_cache.size()) {
+        export_flow(oldest->second);
+        flow_cache.erase(oldest);
     }
 }
 
@@ -151,7 +166,7 @@ void check_flow_timers(uint32_t current_packet_time) {
  * @param dOctets dOctets are calculated earlier from the ether_header
  * */
 void handle_flow(Flow_key key, uint8_t tcp_flags, uint32_t dOctets) {
-    uint32_t current_packet_time = current_packet_time_secs*1000 + current_packet_time_nsecs/1000;
+    uint32_t current_packet_time = current_packet_time_secs * 1000 + current_packet_time_usecs / 1000;
 
     check_flow_timers(current_packet_time);
 
@@ -161,10 +176,10 @@ void handle_flow(Flow_key key, uint8_t tcp_flags, uint32_t dOctets) {
     // std::map::find returns std::map::end if the element is not present in the map
     if (iterator == flow_cache.end()) {
         // the flow is not present, we need to insert it
-        Flow flow = { ntohs(5),  ntohs(1), ntohl(current_packet_time), ntohl(current_packet_time_secs), ntohl(current_packet_time_nsecs),
-                      ntohl(flow_sequence++), 0, 0, 0, ntohl(get<0>(key)), ntohl(get<1>(key)), 0,
-                      0, 0, ntohl(1), ntohl(dOctets), ntohl(current_packet_time), ntohl(current_packet_time), ntohs(get<2>(key)),
-                      ntohs(get<3>(key)), 0, tcp_flags, get<4>(key), get<5>(key), 0, 0, 0, 0, 0 };
+        Flow flow = { ntohs(5),  ntohs(1), ntohl(current_packet_time), ntohl(current_packet_time_secs), ntohl(current_packet_time_usecs*1000),
+                      ntohl(flow_sequence++), 0, 0, 0, get<0>(key), get<1>(key), 0,
+                      0, 0, 1, dOctets, current_packet_time, current_packet_time, get<2>(key),
+                      get<3>(key), 0, tcp_flags, get<4>(key), get<5>(key), 0, 0, 0, 0, 0 };
 
         flow_cache.insert(make_pair(key, flow));
     } else {
@@ -251,7 +266,7 @@ void handle_ipv4(const u_char *bytes, uint32_t dOctets) {
  * */
 void callback (u_char *user __attribute__((unused)), const struct pcap_pkthdr *h, const u_char *bytes) {
     current_packet_time_secs = h->ts.tv_sec;
-    current_packet_time_nsecs = h->ts.tv_usec;
+    current_packet_time_usecs = h->ts.tv_usec;
     struct ether_header *header = (struct ether_header *) bytes;
 
     uint32_t dOctets = h->caplen - sizeof(ether_header);
@@ -340,8 +355,8 @@ void parse_arguments(int argc, char **argv) {
                 break;
 
             case 'm':
+                if (stoi(optarg) < 0) error_exit("ERROR: Flow-cache size cannot be a negative number!", 1);
                 arguments.count = stoi(optarg);
-                if (arguments.count < 0) error_exit("ERROR: Flow-cache size cannot be a negative number!", 1);
                 break;
 
             case '?':
@@ -352,6 +367,13 @@ void parse_arguments(int argc, char **argv) {
                 done = true;
                 break;
         }
+    }
+}
+
+void export_remaining_flows_in_map() {
+    for (Iterator it = flow_cache.begin(); it != flow_cache.end(); /* empty on purpose */) {
+        export_flow(it->second);
+        it = flow_cache.erase(it);
     }
 }
 
@@ -394,6 +416,7 @@ int export_flows_from_pcap_file() {
 
     // https://www.tcpdump.org/manpages/pcap_loop.3pcap.html
     pcap_loop(handle, 0, (pcap_handler)callback, nullptr);
+    export_remaining_flows_in_map();
 
     pcap_close(handle);
 
