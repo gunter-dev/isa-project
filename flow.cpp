@@ -385,7 +385,7 @@ void parse_arguments(int argc, char **argv) {
 }
 
 void export_remaining_flows_in_map() {
-    while (flow_cache.size() != 0) {
+    while (!flow_cache.empty()) {
         Iterator oldest = min_element(flow_cache.begin(), flow_cache.end(),
                                       [](Iterator::value_type &l, Iterator::value_type &r) -> bool {
                                           return l.second.first < r.second.first;
