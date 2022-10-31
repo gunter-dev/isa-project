@@ -6,6 +6,7 @@
 #include <math.h>
 #include <ctime>
 #include <map>
+#include <algorithm>
 
 #include <pcap/pcap.h>
 #include <netinet/ip.h>
@@ -30,8 +31,8 @@ using namespace std;
 typedef struct arguments {
     char *file;                     /* input file, is "-" (for STDIN) by default */
     sockaddr_in netflow_collector;  /* IP address (possibly with port) of the NetFlow collector */
-    int active_timer;               /* time in seconds, after which active flows are exported, 60 by default */
-    int inactive_timer;             /* time in seconds, after which inactive flows are exported, 10 by default */
+    uint32_t active_timer;               /* time in seconds, after which active flows are exported, 60 by default */
+    uint32_t inactive_timer;             /* time in seconds, after which inactive flows are exported, 10 by default */
     size_t count;                   /* if the amount of flows in flow cache reaches this number, export the oldest, 1024 by default */
 } Arguments;
 
@@ -91,10 +92,11 @@ map<Flow_key, Flow> flow_cache;
 typedef map<Flow_key, Flow>::iterator Iterator;
 Arguments arguments = {};
 
-// TODO: sysuptime
 timeval current_packet_timeval;
 uint32_t boot_time = 0;
 uint32_t flow_sequence = 0;
+uint32_t header_sys_uptime;
+bool header_sys_uptime_initialized = false;
 
 /**
  * When an error occurs, this function is called. It prints a message that is
@@ -119,6 +121,7 @@ void export_flow(Flow flow) {
     flow.dOctets = ntohl(flow.dOctets);
     flow.first = ntohl(flow.first);
     flow.last = ntohl(flow.last);
+    flow.flow_sequence = ntohl(flow_sequence++);
 
     int sock, i;
 
@@ -144,7 +147,8 @@ void check_flow_timers(uint32_t sys_uptime) {
     Iterator oldest = flow_cache.begin();
 
     for (Iterator it = oldest; it != flow_cache.end(); /* empty on purpose */) {
-        if (it->second.first < sys_uptime - (arguments.active_timer * 1000) || it->second.last < sys_uptime - (arguments.inactive_timer * 1000)) {
+        if ((arguments.active_timer * 1000 < sys_uptime && it->second.first < sys_uptime - (arguments.active_timer * 1000))
+        || (arguments.inactive_timer * 1000 < sys_uptime && it->second.last < sys_uptime - (arguments.inactive_timer * 1000))) {
             export_flow(it->second);
             it = flow_cache.erase(it);
         } else {
@@ -172,6 +176,10 @@ void handle_flow(Flow_key key, uint8_t tcp_flags, uint32_t dOctets) {
     uint32_t current_packet_time = current_packet_timeval.tv_sec * 1000 + current_packet_timeval.tv_usec / 1000;
 
     uint32_t sys_uptime = current_packet_time - boot_time;
+    if (!header_sys_uptime_initialized) {
+        header_sys_uptime = sys_uptime;
+        header_sys_uptime_initialized = true;
+    }
 
     check_flow_timers(sys_uptime);
 
@@ -181,10 +189,10 @@ void handle_flow(Flow_key key, uint8_t tcp_flags, uint32_t dOctets) {
     // std::map::find returns std::map::end if the element is not present in the map
     if (iterator == flow_cache.end()) {
         // the flow is not present, we need to insert it
-        Flow flow = { ntohs(5),  ntohs(1), ntohl(sys_uptime), ntohl(current_packet_timeval.tv_sec), ntohl(current_packet_timeval.tv_usec*1000),
-                      ntohl(flow_sequence++), 0, 0, 0, get<0>(key), get<1>(key), 0,
-                      0, 0, 1, dOctets, sys_uptime, sys_uptime, get<2>(key),
-                      get<3>(key), 0, tcp_flags, get<4>(key), get<5>(key), 0, 0, 0, 0, 0 };
+        Flow flow = { ntohs(5),  ntohs(1), ntohl(header_sys_uptime), ntohl(current_packet_timeval.tv_sec),
+                      ntohl(current_packet_timeval.tv_usec*1000), 0, 0, 0, 0, get<0>(key), get<1>(key), 0,
+                      0, 0, 1, dOctets, sys_uptime, sys_uptime, get<2>(key), get<3>(key), 0, tcp_flags,
+                      get<4>(key), get<5>(key), 0, 0, 0, 0, 0 };
 
         flow_cache.insert(make_pair(key, flow));
     } else {
@@ -351,13 +359,13 @@ void parse_arguments(int argc, char **argv) {
                 break;
 
             case 'a':
+                if (stoi(optarg) < 0) error_exit("ERROR: Active timer cannot be a negative number!", 1);
                 arguments.active_timer = stoi(optarg);
-                if (arguments.active_timer < 0) error_exit("ERROR: Active timer cannot be a negative number!", 1);
                 break;
 
             case 'i':
+                if (stoi(optarg) < 0) error_exit("ERROR: Inactive timer cannot be a negative number!", 1);
                 arguments.inactive_timer = stoi(optarg);
-                if (arguments.inactive_timer < 0) error_exit("ERROR: Inactive timer cannot be a negative number!", 1);
                 break;
 
             case 'm':
@@ -377,10 +385,13 @@ void parse_arguments(int argc, char **argv) {
 }
 
 void export_remaining_flows_in_map() {
-    // TODO: export postupne od nejstarsiho
-    for (Iterator it = flow_cache.begin(); it != flow_cache.end(); /* empty on purpose */) {
-        export_flow(it->second);
-        it = flow_cache.erase(it);
+    while (flow_cache.size() != 0) {
+        Iterator oldest = min_element(flow_cache.begin(), flow_cache.end(),
+                                      [](Iterator::value_type &l, Iterator::value_type &r) -> bool {
+                                          return l.second.first < r.second.first;
+                                      });
+        export_flow(oldest->second);
+        flow_cache.erase(oldest);
     }
 }
 
