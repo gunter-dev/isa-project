@@ -139,12 +139,12 @@ void export_flow(Flow flow) {
  * in the active_timer argument or if it had been inactive for more than
  * the amount of seconds specified in the inactive_timer, it is exported.
  * */
-void check_flow_timers(uint32_t current_packet_time) {
+void check_flow_timers(uint32_t sys_uptime) {
     // deleting according to this stack overflow site -> https://stackoverflow.com/questions/8234779/how-to-remove-from-a-map-while-iterating-it
     Iterator oldest = flow_cache.begin();
 
     for (Iterator it = oldest; it != flow_cache.end(); /* empty on purpose */) {
-        if (it->second.first < current_packet_time - (arguments.active_timer * 1000) || it->second.last < current_packet_time - (arguments.inactive_timer * 1000)) {
+        if (it->second.first < sys_uptime - (arguments.active_timer * 1000) || it->second.last < sys_uptime - (arguments.inactive_timer * 1000)) {
             export_flow(it->second);
             it = flow_cache.erase(it);
         } else {
@@ -171,7 +171,9 @@ void check_flow_timers(uint32_t current_packet_time) {
 void handle_flow(Flow_key key, uint8_t tcp_flags, uint32_t dOctets) {
     uint32_t current_packet_time = current_packet_timeval.tv_sec * 1000 + current_packet_timeval.tv_usec / 1000;
 
-    check_flow_timers(current_packet_time);
+    uint32_t sys_uptime = current_packet_time - boot_time;
+
+    check_flow_timers(sys_uptime);
 
     Iterator iterator = flow_cache.find(key);
 
@@ -179,9 +181,9 @@ void handle_flow(Flow_key key, uint8_t tcp_flags, uint32_t dOctets) {
     // std::map::find returns std::map::end if the element is not present in the map
     if (iterator == flow_cache.end()) {
         // the flow is not present, we need to insert it
-        Flow flow = { ntohs(5),  ntohs(1), ntohl(current_packet_time), ntohl(current_packet_timeval.tv_sec), ntohl(current_packet_timeval.tv_usec*1000),
+        Flow flow = { ntohs(5),  ntohs(1), ntohl(sys_uptime), ntohl(current_packet_timeval.tv_sec), ntohl(current_packet_timeval.tv_usec*1000),
                       ntohl(flow_sequence++), 0, 0, 0, get<0>(key), get<1>(key), 0,
-                      0, 0, 1, dOctets, current_packet_time, current_packet_time, get<2>(key),
+                      0, 0, 1, dOctets, sys_uptime, sys_uptime, get<2>(key),
                       get<3>(key), 0, tcp_flags, get<4>(key), get<5>(key), 0, 0, 0, 0, 0 };
 
         flow_cache.insert(make_pair(key, flow));
@@ -189,7 +191,7 @@ void handle_flow(Flow_key key, uint8_t tcp_flags, uint32_t dOctets) {
         // the flow is found, we need to update it
         iterator->second.dPkts++;
         iterator->second.dOctets += dOctets;
-        iterator->second.last = current_packet_time;
+        iterator->second.last = sys_uptime;
         iterator->second.tcp_flags |= tcp_flags;
     }
 }
@@ -389,18 +391,10 @@ void export_remaining_flows_in_map() {
  * */
 int export_flows_from_pcap_file() {
     char errbuf[PCAP_ERRBUF_SIZE];
-    pcap_if_t *alldevsp;
     pcap_t *handle;
     struct bpf_program fp;
     char filter_exp[] = "icmp or tcp or udp";
     bpf_u_int32 net = 0;
-
-    // usage of pcap_findalldevs and pcap_freealldevs is from here
-    // https://www.tcpdump.org/manpages/pcap_findalldevs.3pcap.html
-    if (pcap_findalldevs(&alldevsp, errbuf) == -1) {
-        cout << "ERROR: pcap_findalldevs\n" << endl;
-        return 1;
-    }
 
     handle = pcap_open_offline(arguments.file, errbuf);
 
@@ -424,8 +418,6 @@ int export_flows_from_pcap_file() {
     export_remaining_flows_in_map();
 
     pcap_close(handle);
-
-    pcap_freealldevs(alldevsp);
 
     return 0;
 }
