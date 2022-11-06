@@ -8,6 +8,8 @@
 #include <map>
 #include <algorithm>
 
+#define __FAVOR_BSD
+
 #include <pcap/pcap.h>
 #include <netinet/ip.h>
 #include <netinet/ip6.h>
@@ -164,6 +166,17 @@ void check_flow_timers(uint32_t sys_uptime) {
     }
 }
 
+void check_tcp_flags() {
+    for (Iterator it = flow_cache.begin(); it != flow_cache.end(); /* empty on purpose */) {
+        if ((it->second.tcp_flags & (1 << 2)) || (it->second.tcp_flags & 1)) {
+            export_flow(it->second);
+            it = flow_cache.erase(it);
+        } else {
+            ++it;
+        }
+    }
+}
+
 /**
  * For each packet this function is called. It attempts to find the according
  * flow in the flow cache. If it doesn't find it, new flow is created and
@@ -203,6 +216,8 @@ void handle_flow(Flow_key key, uint8_t tcp_flags, uint32_t dOctets) {
         iterator->second.last = sys_uptime;
         iterator->second.tcp_flags |= tcp_flags;
     }
+
+    check_tcp_flags();
 }
 
 /**
