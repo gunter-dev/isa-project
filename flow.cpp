@@ -147,8 +147,9 @@ void check_flow_timers(uint32_t sys_uptime) {
     Iterator oldest = flow_cache.begin();
 
     for (Iterator it = oldest; it != flow_cache.end(); /* empty on purpose */) {
-        if ((arguments.active_timer * 1000 < sys_uptime && it->second.first < sys_uptime - (arguments.active_timer * 1000))
-        || (arguments.inactive_timer * 1000 < sys_uptime && it->second.last < sys_uptime - (arguments.inactive_timer * 1000))) {
+        bool active_invalid = arguments.active_timer * 1000 < sys_uptime && it->second.first < sys_uptime - (arguments.active_timer * 1000);
+        bool inactive_invalid = arguments.inactive_timer * 1000 < sys_uptime && it->second.last < sys_uptime - (arguments.inactive_timer * 1000);
+        if (active_invalid || inactive_invalid) {
             export_flow(it->second);
             it = flow_cache.erase(it);
         } else {
