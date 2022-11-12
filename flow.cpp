@@ -10,6 +10,7 @@
 
 #define __FAVOR_BSD
 
+#include <netdb.h>
 #include <pcap/pcap.h>
 #include <netinet/ip.h>
 #include <netinet/ip6.h>
@@ -97,8 +98,6 @@ Arguments arguments = {};
 timeval current_packet_timeval;
 uint32_t boot_time = 0;
 uint32_t flow_sequence = 0;
-uint32_t header_sys_uptime;
-bool header_sys_uptime_initialized = false;
 
 /**
  * When an error occurs, this function is called. It prints a message that is
@@ -111,6 +110,16 @@ bool header_sys_uptime_initialized = false;
 void error_exit(const char *message, uint8_t code) {
     fprintf(stderr, "%s\n", message);
     exit(code);
+}
+
+void print_help() {
+    cout << "Usage: ./flow [-f <file>] [-c <netflow_collector>[:<port>]] [-a <active_timer>] [-i <inactive_timer>] [-m <count>]" << endl;
+    cout << "\t-h\tprints this help window" << endl;
+    cout << "\t-f\tthe input file (if not specified, reads from STDIN)" << endl;
+    cout << "\t-c\tthe address of the netflow collector, to which the exported data will be sent, can also include port number (default netflow collector is 127.0.0.1:2055)" << endl;
+    cout << "\t-a\ttime in seconds after which active flows will be exported (60 by default)" << endl;
+    cout << "\t-i\ttime in seconds after which inactive flows will be exported (10 by default)" << endl;
+    cout << "\t-m\tthe max number of flows, that can be stored in the flow cache at the same time (1024 by default)" << endl;
 }
 
 /**
@@ -144,7 +153,7 @@ void export_flow(Flow flow) {
  * in the active_timer argument or if it had been inactive for more than
  * the amount of seconds specified in the inactive_timer, it is exported.
  * */
-void check_flow_timers(uint32_t sys_uptime) {
+void check_flow_timers(uint32_t sys_uptime, bool is_in_cache) {
     // deleting according to this stack overflow site -> https://stackoverflow.com/questions/8234779/how-to-remove-from-a-map-while-iterating-it
     Iterator oldest = flow_cache.begin();
 
@@ -160,7 +169,7 @@ void check_flow_timers(uint32_t sys_uptime) {
         }
     }
 
-    if (arguments.count <= flow_cache.size()) {
+    if (is_in_cache && arguments.count <= flow_cache.size()) {
         export_flow(oldest->second);
         flow_cache.erase(oldest);
     }
@@ -190,20 +199,17 @@ void handle_flow(Flow_key key, uint8_t tcp_flags, uint32_t dOctets) {
     uint32_t current_packet_time = current_packet_timeval.tv_sec * 1000 + current_packet_timeval.tv_usec / 1000;
 
     uint32_t sys_uptime = current_packet_time - boot_time;
-    if (!header_sys_uptime_initialized) {
-        header_sys_uptime = sys_uptime;
-        header_sys_uptime_initialized = true;
-    }
-
-    check_flow_timers(sys_uptime);
 
     Iterator iterator = flow_cache.find(key);
+    bool is_in_cache = iterator == flow_cache.end();
+
+    check_flow_timers(sys_uptime, is_in_cache);
 
     // according to https://cplusplus.com/reference/map/map/find/
     // std::map::find returns std::map::end if the element is not present in the map
-    if (iterator == flow_cache.end()) {
+    if (is_in_cache) {
         // the flow is not present, we need to insert it
-        Flow flow = { ntohs(5),  ntohs(1), ntohl(header_sys_uptime), ntohl(current_packet_timeval.tv_sec),
+        Flow flow = { ntohs(5),  ntohs(1), ntohl(sys_uptime), ntohl(current_packet_timeval.tv_sec),
                       ntohl(current_packet_timeval.tv_usec*1000), 0, 0, 0, 0, get<0>(key), get<1>(key), 0,
                       0, 0, 1, dOctets, sys_uptime, sys_uptime, get<2>(key), get<3>(key), 0, tcp_flags,
                       get<4>(key), get<5>(key), 0, 0, 0, 0, 0 };
@@ -337,6 +343,7 @@ void parse_arguments(int argc, char **argv) {
     int idx = 0;
 
     static struct option options[] = {
+                    { "help", no_argument, nullptr, 'h' },
                     { "file", required_argument, nullptr, 'f' },
                     { "netflow_collector", required_argument, nullptr, 'c' },
                     { "active_timer", required_argument, nullptr, 'a' },
@@ -348,9 +355,12 @@ void parse_arguments(int argc, char **argv) {
     bool done = false;
 
     while (!done) {
-        int c = getopt_long(argc, argv, "f:c:a:i:m:", options, &idx);
+        int c = getopt_long(argc, argv, "hf:c:a:i:m:", options, &idx);
 
         switch (c) {
+            case 'h':
+                print_help();
+                exit(0);
             case 'f':
                 arguments.file = optarg;
                 break;
@@ -390,6 +400,7 @@ void parse_arguments(int argc, char **argv) {
                 break;
 
             case '?':
+                print_help();
                 error_exit("ERROR: Invalid arguments!", 1);
                 break;
 
