@@ -2,6 +2,8 @@
 
 This is a project for the ISA course - FIT VUT.
 
+**Final evaluation:** 16.5/20
+
 ## Author
 
 Jméno: Lukáš Vincenc \
